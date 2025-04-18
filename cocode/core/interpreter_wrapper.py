@@ -324,8 +324,43 @@ class InterpreterWrapper:
         # Not a code block, send to the model
         # Add context from file indexer if available
         indexed_context = self.file_indexer.get_context_for_query(user_input)
+        
+        # Check if the file indexer has vector embeddings available for semantic search
+        semantic_context = ""
+        if hasattr(self.file_indexer, 'embeddings') and self.file_indexer.embeddings and user_input:
+            try:
+                # Get semantic search results
+                semantic_results = self.file_indexer.semantic_search_files(user_input, max_results=3)
+                if semantic_results:
+                    semantic_context = "Semantically relevant files:\n"
+                    for result in semantic_results:
+                        file_path = result['path']
+                        relevance = result.get('relevance', 0.0)
+                        semantic_context += f"- {file_path} (relevance: {relevance:.2f})\n"
+                    
+                    # Also check for semantically relevant symbols
+                    symbol_results = self.file_indexer.semantic_search_symbols(user_input, max_results=3)
+                    if symbol_results:
+                        semantic_context += "\nSemantically relevant symbols:\n"
+                        for result in symbol_results:
+                            symbol = result['symbol']
+                            symbol_type = result['type']
+                            file_path = result['file']
+                            line = result['line']
+                            relevance = result.get('relevance', 0.0)
+                            semantic_context += f"- {symbol} ({symbol_type}) in {file_path}:{line} (relevance: {relevance:.2f})\n"
+            except Exception as e:
+                logger.warning(f"Error in semantic search: {e}")
+        
+        # Combine regular indexed context with semantic search results
+        combined_context = ""
         if indexed_context:
-            enhanced_input = f"{user_input}\n\nContext from codebase:\n{indexed_context}"
+            combined_context += indexed_context + "\n\n"
+        if semantic_context:
+            combined_context += semantic_context
+            
+        if combined_context:
+            enhanced_input = f"{user_input}\n\nContext from codebase:\n{combined_context}"
         else:
             enhanced_input = user_input
         

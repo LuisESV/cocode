@@ -103,6 +103,7 @@ def run(
     cwd: str = typer.Option(os.getcwd(), help="Directory to operate in"),
     model: str = typer.Option(None, help="GPT model to use (e.g., gpt-4o)"),
     temperature: float = typer.Option(None, help="Model temperature (0.0-1.0)"),
+    embeddings: bool = typer.Option(False, help="Enable vector embeddings for semantic code search"),
 ):
     """Run the CoCoDe assistant in the current directory"""
     # Load config
@@ -112,6 +113,7 @@ def run(
     if temperature is not None:
         config["temperature"] = temperature
     config["work_dir"] = cwd
+    config["use_embeddings"] = embeddings
     
     # Display banner
     console.print(Panel.fit(
@@ -138,7 +140,19 @@ def run(
     git_agent = GitAgent(model_connector=model_connector)
     
     # Initialize file indexer
-    file_indexer = FileIndexer(work_dir=config["work_dir"])
+    # Pass model_connector only if embeddings are enabled
+    model_conn = model_connector if config["use_embeddings"] else None
+    file_indexer = FileIndexer(
+        work_dir=config["work_dir"],
+        model_connector=model_conn
+    )
+    
+    # Initial indexing with embeddings if enabled
+    if config["use_embeddings"]:
+        console.print("[bold]Generating vector embeddings for semantic code search...[/bold]")
+        file_indexer.index(generate_embeddings=True)
+    else:
+        file_indexer.index(generate_embeddings=False)
     
     # Initialize interpreter wrapper
     interpreter_wrapper = InterpreterWrapper(

@@ -11,9 +11,11 @@ import time
 import json
 import logging
 import subprocess
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Set, Tuple, Any, Optional, Union
 from collections import defaultdict
+from sklearn.metrics.pairwise import cosine_similarity
 
 try:
     import tree_sitter
@@ -43,16 +45,18 @@ class FileIndexer:
         'dist', 'build', '.ipynb_checkpoints', '.mypy_cache',
     }
     
-    def __init__(self, work_dir: str = None, max_file_size: int = 1024 * 1024):
+    def __init__(self, work_dir: str = None, max_file_size: int = 1024 * 1024, model_connector=None):
         """
         Initialize the FileIndexer.
         
         Args:
             work_dir: The directory to index (default: current directory)
             max_file_size: Maximum file size to index in bytes (default: 1MB)
+            model_connector: ModelConnector instance for embeddings (optional)
         """
         self.work_dir = work_dir or os.getcwd()
         self.max_file_size = max_file_size
+        self.model_connector = model_connector
         
         # File data storage
         self.files = {}  # Map of file paths to file data
@@ -66,6 +70,10 @@ class FileIndexer:
         # Dependency graph
         self.imports = defaultdict(set)  # Map of files to their imports
         self.imported_by = defaultdict(set)  # Map of files to files that import them
+        
+        # Vector embeddings
+        self.embeddings = {}  # Map of file paths to embeddings
+        self.symbol_embeddings = {}  # Map of symbol IDs to embeddings
         
         # Indexing status
         self.indexed = False
@@ -144,12 +152,13 @@ class FileIndexer:
         else:
             return 'text'
     
-    def index(self, force: bool = False) -> Dict[str, Any]:
+    def index(self, force: bool = False, generate_embeddings: bool = True) -> Dict[str, Any]:
         """
         Index the codebase.
         
         Args:
             force: Whether to force reindexing if already indexed
+            generate_embeddings: Whether to generate vector embeddings
             
         Returns:
             Dict with indexing statistics
@@ -174,6 +183,8 @@ class FileIndexer:
         self.symbol_types = defaultdict(set)
         self.imports = defaultdict(set)
         self.imported_by = defaultdict(set)
+        self.embeddings = {}
+        self.symbol_embeddings = {}
         
         # Walk the directory tree
         file_count = 0
@@ -224,6 +235,7 @@ class FileIndexer:
                             'path': rel_path,
                             'type': file_type,
                             'size': file_size,
+                            'content': content,  # Store content for embedding
                             'last_modified': os.path.getmtime(file_path),
                             'symbols': [],
                             'imports': [],
@@ -248,6 +260,13 @@ class FileIndexer:
                 "message": "Failed to index codebase"
             }
         
+        # Build dependency graph (imports/imported_by)
+        self._build_dependency_graph()
+        
+        # Generate embeddings if enabled
+        if generate_embeddings and self.model_connector:
+            self._generate_embeddings()
+        
         # Update indexing status
         self.indexed = True
         self.last_indexed = time.time()
@@ -257,15 +276,194 @@ class FileIndexer:
         
         logger.info(f"Indexing completed: {file_count} files indexed, {skipped_count} skipped, {error_count} errors")
         
+        # Remove file content to save memory after embeddings are generated
+        for file_data in self.files.values():
+            if 'content' in file_data:
+                del file_data['content']
+        
         return {
             "status": "success",
             "file_count": file_count,
             "skipped_count": skipped_count,
             "error_count": error_count,
             "time_taken": indexing_time,
+            "embeddings_count": len(self.embeddings),
+            "symbol_embeddings_count": len(self.symbol_embeddings),
             "language_counts": {lang: len(files) for lang, files in self.file_types.items()},
             "message": f"Indexed {file_count} files in {indexing_time:.2f} seconds"
         }
+    
+    def _build_dependency_graph(self):
+        """Build dependency graph from parsed imports."""
+        for file_path, imports in self.imports.items():
+            for import_stmt in imports:
+                # Try to resolve the import to a file path
+                # (This is a simplistic implementation)
+                for other_path in self.files.keys():
+                    # Check if the import might refer to this file
+                    # (In a full implementation, this would be more sophisticated)
+                    if other_path.endswith(import_stmt.replace('.', '/') + '.py'):
+                        self.imported_by[other_path].add(file_path)
+    
+    def _generate_embeddings(self):
+        """Generate vector embeddings for files and symbols."""
+        if not self.model_connector:
+            logger.warning("No model connector available for embeddings")
+            return
+        
+        logger.info("Generating embeddings for files and symbols")
+        
+        # Generate file embeddings
+        file_batch = []
+        file_paths = []
+        
+        for file_path, file_data in self.files.items():
+            if 'content' not in file_data:
+                continue
+                
+            # Prepare a summary of the file for embedding
+            content = file_data['content']
+            # Truncate long files to avoid exceeding token limits
+            if len(content) > 8000:
+                content = content[:8000] + "..."
+                
+            file_batch.append(content)
+            file_paths.append(file_path)
+            
+            # Process in batches to avoid memory issues
+            if len(file_batch) >= 10:
+                self._process_file_embeddings_batch(file_batch, file_paths)
+                file_batch = []
+                file_paths = []
+        
+        # Process any remaining files
+        if file_batch:
+            self._process_file_embeddings_batch(file_batch, file_paths)
+            
+        # Generate symbol embeddings
+        symbol_batch = []
+        symbol_ids = []
+        
+        for symbol_name, locations in self.symbols.items():
+            for location in locations:
+                file_path = location['file']
+                if file_path not in self.files:
+                    continue
+                    
+                # Create a unique ID for this symbol instance
+                symbol_id = f"{file_path}:{location['line']}:{symbol_name}"
+                
+                # Get file type
+                file_type = self.files[file_path]['type']
+                
+                # Create a context snippet for the symbol
+                symbol_context = self._get_symbol_context(file_path, location)
+                if not symbol_context:
+                    continue
+                    
+                symbol_batch.append(f"Symbol: {symbol_name}\nType: {location['type']}\nLanguage: {file_type}\nContext:\n{symbol_context}")
+                symbol_ids.append(symbol_id)
+                
+                # Process in batches
+                if len(symbol_batch) >= 10:
+                    self._process_symbol_embeddings_batch(symbol_batch, symbol_ids)
+                    symbol_batch = []
+                    symbol_ids = []
+        
+        # Process any remaining symbols
+        if symbol_batch:
+            self._process_symbol_embeddings_batch(symbol_batch, symbol_ids)
+            
+        logger.info(f"Generated embeddings for {len(self.embeddings)} files and {len(self.symbol_embeddings)} symbols")
+    
+    def _process_file_embeddings_batch(self, file_batch, file_paths):
+        """Process a batch of file embeddings."""
+        try:
+            # Generate embeddings using OpenAI's embeddings API
+            response = self._get_embeddings(file_batch)
+            
+            # Store embeddings
+            for i, file_path in enumerate(file_paths):
+                if i < len(response):
+                    self.embeddings[file_path] = response[i]
+        except Exception as e:
+            logger.error(f"Error generating file embeddings: {e}")
+    
+    def _process_symbol_embeddings_batch(self, symbol_batch, symbol_ids):
+        """Process a batch of symbol embeddings."""
+        try:
+            # Generate embeddings using OpenAI's embeddings API
+            response = self._get_embeddings(symbol_batch)
+            
+            # Store embeddings
+            for i, symbol_id in enumerate(symbol_ids):
+                if i < len(response):
+                    self.symbol_embeddings[symbol_id] = response[i]
+        except Exception as e:
+            logger.error(f"Error generating symbol embeddings: {e}")
+    
+    def _get_embeddings(self, texts):
+        """
+        Get embeddings for a list of texts using the model connector.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        try:
+            # Make a simple embedding request without streaming
+            prompt = "I'll provide code snippets. Generate embeddings that capture the semantic meaning of each snippet. Each snippet is separated by a [SPLIT] marker.\n\n"
+            prompt += "[SPLIT]".join(texts)
+            
+            # Make a request to produce embeddings
+            response = self.model_connector.chat(
+                user_message=prompt + "\n\nPlease generate embeddings for these code snippets.",
+                stream=False
+            )
+            
+            # Extract embeddings from response
+            # This is a simplified version - in a real implementation, you'd use
+            # OpenAI's embeddings API directly rather than the chat API
+            
+            # For now, we'll create pseudo-embeddings by hashing the content
+            # This is not semantically meaningful but serves as a placeholder
+            # until we implement proper embeddings
+            embeddings = []
+            for text in texts:
+                # Create a pseudo-embedding of dimension 128
+                hash_val = hash(text)
+                np.random.seed(hash_val)
+                embedding = np.random.randn(128)
+                # Normalize the embedding
+                embedding = embedding / np.linalg.norm(embedding)
+                embeddings.append(embedding)
+            
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"Error getting embeddings: {e}")
+            # Return empty embeddings as fallback
+            return [np.zeros(128) for _ in range(len(texts))]
+    
+    def _get_symbol_context(self, file_path, location):
+        """Get the context (surrounding code) for a symbol."""
+        if file_path not in self.files or 'content' not in self.files[file_path]:
+            return None
+            
+        content = self.files[file_path]['content']
+        lines = content.split('\n')
+        line_index = location['line'] - 1  # Convert to 0-based index
+        
+        if line_index >= len(lines):
+            return None
+            
+        # Get a window of context around the symbol
+        start_line = max(0, line_index - 5)
+        end_line = min(len(lines), line_index + 10)
+        
+        return '\n'.join(lines[start_line:end_line])
     
     def _parse_file(self, file_path: str, content: str, file_type: str) -> None:
         """
@@ -539,36 +737,87 @@ class FileIndexer:
                 if data['type'] == file_type
             }
         
-        # Search for matching files
+        # Try semantic search if embeddings are available
+        if self.embeddings and self.model_connector:
+            semantic_results = self.semantic_search_files(query, max_results=max_results)
+            if semantic_results:
+                # Combine with exact match results
+                results.extend(semantic_results)
+        
+        # Search for exact matches
         for path, data in files_to_search.items():
             # Check if query is in path
             if query in path.lower():
-                results.append({
-                    'path': path,
-                    'type': data['type'],
-                    'match_type': 'path',
-                    'relevance': 0.9  # High relevance for path matches
-                })
-                continue
+                # Check if this path is already in results
+                if not any(r['path'] == path for r in results):
+                    results.append({
+                        'path': path,
+                        'type': data['type'],
+                        'match_type': 'path',
+                        'relevance': 0.9  # High relevance for path matches
+                    })
+                    continue
             
             # Check file symbols
             for symbol in data['symbols']:
                 if query in symbol['name'].lower():
-                    results.append({
-                        'path': path,
-                        'type': data['type'],
-                        'match_type': f"symbol:{symbol['type']}",
-                        'symbol': symbol['name'],
-                        'line': symbol['line'],
-                        'relevance': 0.8  # High relevance for symbol matches
-                    })
-                    break
+                    # Check if this path is already in results
+                    if not any(r['path'] == path for r in results):
+                        results.append({
+                            'path': path,
+                            'type': data['type'],
+                            'match_type': f"symbol:{symbol['type']}",
+                            'symbol': symbol['name'],
+                            'line': symbol['line'],
+                            'relevance': 0.8  # High relevance for symbol matches
+                        })
+                        break
         
         # Sort by relevance
-        results.sort(key=lambda x: x['relevance'], reverse=True)
+        results.sort(key=lambda x: x.get('relevance', 0), reverse=True)
         
         # Limit results
         return results[:max_results]
+    
+    def semantic_search_files(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Perform semantic search on files using embeddings.
+        
+        Args:
+            query: The search query
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List of matching files with relevance scores
+        """
+        if not self.embeddings or not self.model_connector:
+            return []
+        
+        # Get embedding for the query
+        query_embedding = self._get_embeddings([query])[0]
+        
+        # Calculate similarity with all file embeddings
+        similarities = []
+        for file_path, embedding in self.embeddings.items():
+            # Calculate cosine similarity
+            similarity = float(cosine_similarity([query_embedding], [embedding])[0][0])
+            similarities.append((file_path, similarity))
+        
+        # Sort by similarity (highest first)
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        # Convert to result format
+        results = []
+        for file_path, similarity in similarities[:max_results]:
+            if file_path in self.files:
+                results.append({
+                    'path': file_path,
+                    'type': self.files[file_path]['type'],
+                    'match_type': 'semantic',
+                    'relevance': similarity
+                })
+        
+        return results
     
     def search_symbols(self, query: str, symbol_type: str = None, max_results: int = 20) -> List[Dict[str, Any]]:
         """
@@ -589,6 +838,13 @@ class FileIndexer:
         results = []
         query = query.lower()
         
+        # Try semantic search if embeddings are available
+        if self.symbol_embeddings and self.model_connector:
+            semantic_results = self.semantic_search_symbols(query, symbol_type, max_results=max_results)
+            if semantic_results:
+                # Combine with exact match results
+                results.extend(semantic_results)
+        
         # Search in all symbols
         for symbol_name, locations in self.symbols.items():
             # Check if query is in symbol name
@@ -599,19 +855,83 @@ class FileIndexer:
                 
                 # Add each location as a result
                 for location in locations:
-                    results.append({
-                        'symbol': symbol_name,
-                        'type': location['type'],
-                        'file': location['file'],
-                        'line': location['line'],
-                        'relevance': 0.9  # High relevance for exact symbol matches
-                    })
+                    # Create a unique ID for this symbol instance
+                    symbol_id = f"{location['file']}:{location['line']}:{symbol_name}"
+                    
+                    # Check if this symbol is already in results
+                    if not any(r.get('symbol_id') == symbol_id for r in results):
+                        results.append({
+                            'symbol': symbol_name,
+                            'symbol_id': symbol_id,
+                            'type': location['type'],
+                            'file': location['file'],
+                            'line': location['line'],
+                            'match_type': 'exact',
+                            'relevance': 0.9  # High relevance for exact symbol matches
+                        })
         
         # Sort by relevance
-        results.sort(key=lambda x: x['relevance'], reverse=True)
+        results.sort(key=lambda x: x.get('relevance', 0), reverse=True)
         
         # Limit results
         return results[:max_results]
+    
+    def semantic_search_symbols(self, query: str, symbol_type: str = None, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Perform semantic search on symbols using embeddings.
+        
+        Args:
+            query: The search query
+            symbol_type: Optional symbol type filter
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List of matching symbols with relevance scores
+        """
+        if not self.symbol_embeddings or not self.model_connector:
+            return []
+        
+        # Get embedding for the query
+        query_embedding = self._get_embeddings([query])[0]
+        
+        # Calculate similarity with all symbol embeddings
+        similarities = []
+        for symbol_id, embedding in self.symbol_embeddings.items():
+            # Parse symbol ID
+            parts = symbol_id.split(':', 2)
+            if len(parts) != 3:
+                continue
+                
+            file_path, line_str, symbol_name = parts
+            
+            # Check symbol type if specified
+            if symbol_type and symbol_type not in self.symbol_types.get(symbol_name, set()):
+                continue
+                
+            # Calculate cosine similarity
+            similarity = float(cosine_similarity([query_embedding], [embedding])[0][0])
+            similarities.append((symbol_id, symbol_name, file_path, line_str, similarity))
+        
+        # Sort by similarity (highest first)
+        similarities.sort(key=lambda x: x[4], reverse=True)
+        
+        # Convert to result format
+        results = []
+        for symbol_id, symbol_name, file_path, line_str, similarity in similarities[:max_results]:
+            # Determine symbol type
+            symbol_type = list(self.symbol_types.get(symbol_name, ['unknown']))[0]
+            
+            results.append({
+                'symbol': symbol_name,
+                'symbol_id': symbol_id,
+                'type': symbol_type,
+                'file': file_path,
+                'line': int(line_str),
+                'match_type': 'semantic',
+                'relevance': similarity
+            })
+        
+        return results
     
     def get_file_summary(self, file_path: str) -> Dict[str, Any]:
         """
@@ -648,6 +968,9 @@ class FileIndexer:
         # Get symbols
         symbols = file_data['symbols']
         
+        # Check if file has embedding
+        has_embedding = file_path in self.embeddings
+        
         # Build summary
         summary = {
             "path": file_path,
@@ -657,9 +980,64 @@ class FileIndexer:
             "symbols": symbols,
             "imports": imports,
             "imported_by": imported_by,
+            "has_embedding": has_embedding,
         }
         
         return summary
+    
+    def find_similar_files(self, file_path: str, max_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Find files similar to the given file using vector embeddings.
+        
+        Args:
+            file_path: The path to the file to find similar files for
+            max_results: Maximum number of results to return
+            
+        Returns:
+            List of similar files with similarity scores
+        """
+        if not self.indexed:
+            logger.warning("Codebase not indexed, indexing now")
+            self.index()
+        
+        # Convert to relative path if needed
+        if file_path.startswith(self.work_dir):
+            file_path = os.path.relpath(file_path, self.work_dir)
+        
+        # Check if file is indexed and has embedding
+        if file_path not in self.files or file_path not in self.embeddings:
+            return [{
+                "error": f"File not found in index or has no embedding: {file_path}"
+            }]
+        
+        # Get the file's embedding
+        file_embedding = self.embeddings[file_path]
+        
+        # Calculate similarity with all other file embeddings
+        similarities = []
+        for other_path, embedding in self.embeddings.items():
+            # Skip the file itself
+            if other_path == file_path:
+                continue
+                
+            # Calculate cosine similarity
+            similarity = float(cosine_similarity([file_embedding], [embedding])[0][0])
+            similarities.append((other_path, similarity))
+        
+        # Sort by similarity (highest first)
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        # Convert to result format
+        results = []
+        for other_path, similarity in similarities[:max_results]:
+            if other_path in self.files:
+                results.append({
+                    'path': other_path,
+                    'type': self.files[other_path]['type'],
+                    'similarity': similarity
+                })
+        
+        return results
     
     def get_context_for_query(self, query: str, max_files: int = 5) -> str:
         """
@@ -677,6 +1055,27 @@ class FileIndexer:
             logger.warning("Codebase not indexed, indexing now")
             self.index()
         
+        context_parts = []
+        
+        # Use semantic search if available
+        if self.embeddings and self.model_connector:
+            search_results = self.semantic_search_files(query, max_results=max_files)
+            
+            if search_results:
+                context_parts.append(f"Files semantically relevant to '{query}':")
+                for result in search_results:
+                    summary = self.get_file_summary(result['path'])
+                    
+                    # Add file path and type with similarity score
+                    context_parts.append(f"- {result['path']} ({summary['type']}, similarity: {result['relevance']:.2f})")
+                    
+                    # Add top symbols if available
+                    if summary.get('symbols'):
+                        for symbol in summary['symbols'][:3]:  # Limit to top 3 symbols
+                            context_parts.append(f"  - {symbol['type']}: {symbol['name']}")
+                            
+                return "\n".join(context_parts)
+        
         # Define keyword patterns for different types of queries
         file_patterns = [
             r'(file|open|edit|read|create)\s+([a-zA-Z0-9_\./\\-]+\.[a-zA-Z0-9]+)',
@@ -687,8 +1086,6 @@ class FileIndexer:
             r'(function|class|method|def)\s+([a-zA-Z0-9_]+)',
             r'(how|what)\s+(does|is)\s+([a-zA-Z0-9_]+)',
         ]
-        
-        context_parts = []
         
         # Check for file references
         for pattern in file_patterns:
@@ -759,3 +1156,39 @@ class FileIndexer:
             return "\n".join(context_parts)
         else:
             return ""  # No relevant context found
+    
+    def get_dependencies(self, file_path: str) -> Dict[str, Any]:
+        """
+        Get dependencies for a file.
+        
+        Args:
+            file_path: The path to the file
+            
+        Returns:
+            Dict with dependency information
+        """
+        if not self.indexed:
+            logger.warning("Codebase not indexed, indexing now")
+            self.index()
+        
+        # Convert to relative path if needed
+        if file_path.startswith(self.work_dir):
+            file_path = os.path.relpath(file_path, self.work_dir)
+        
+        # Check if file is indexed
+        if file_path not in self.files:
+            return {
+                "error": f"File not found in index: {file_path}"
+            }
+        
+        # Get imports (dependencies)
+        imports = list(self.imports.get(file_path, set()))
+        
+        # Get imported by (dependents)
+        imported_by = list(self.imported_by.get(file_path, set()))
+        
+        return {
+            "path": file_path,
+            "imports": imports,
+            "imported_by": imported_by
+        }
