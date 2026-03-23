@@ -38,6 +38,28 @@ cocode run
 cocode run --model gpt-4o
 ```
 
+## Web Demo (Frontend-Only)
+
+This repo includes a standalone web prototype that demonstrates a split terminal + live system map experience.
+It is fully static and runs in the browser (no backend).
+
+**What it does**
+- Terminal-style scripted interview for a Task Manager demo
+- Live system map that builds as requirements are gathered
+- Component deep-dive maps (click any box to drill in)
+- Simulated build output with code-like edit snippets
+
+**Run it locally**
+```bash
+# Option 1: open directly
+open web/index.html
+
+# Option 2: serve a local static server
+python3 -m http.server --directory web 8000
+```
+
+Then open `http://localhost:8000` in your browser.
+
 ## Requirements
 
 - Python 3.9 or higher

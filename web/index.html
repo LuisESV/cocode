@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CoCoDe Web Demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">CC</div>
+        <div>
+          <div class="title">CoCoDe Web</div>
+          <div class="subtitle">System-to-Function Demo</div>
+        </div>
+      </div>
+      <div class="status">
+        <div class="pill" id="view-mode">Awaiting Project</div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="panel terminal-panel">
+        <div class="panel-header">
+          <span class="panel-title">Terminal</span>
+          <span class="panel-meta">Simulated execution · Real typing</span>
+        </div>
+        <div class="terminal" id="terminal">
+          <div class="terminal-line system">co> Booting demo context…</div>
+          <div class="terminal-line system">co> Pick a demo to begin: Task Manager, Tiny CRM, Social App.</div>
+        </div>
+        <div class="prompt-row">
+          <span class="prompt">co> </span>
+          <input id="prompt-input" type="text" placeholder="Type a response or pick a chip…" autocomplete="off" />
+        </div>
+        <div class="chip-row" id="chip-row">
+          <button class="chip" data-seed="Task Manager">Task Manager</button>
+          <button class="chip" data-seed="Tiny CRM">Tiny CRM</button>
+          <button class="chip" data-seed="Social App">Social App</button>
+        </div>
+      </section>
+
+      <div class="divider" id="divider"></div>
+
+      <section class="panel viz-panel">
+        <div class="panel-header">
+          <span class="panel-title">System Map</span>
+          <span class="panel-meta">Live architecture view</span>
+        </div>
+
+        <div class="viz-grid">
+          <div class="map" id="system-map">
+            <div class="map-placeholder" id="map-placeholder">
+              <div class="placeholder-title">System map is empty</div>
+              <div class="placeholder-body">Select a demo and answer questions to build the architecture live.</div>
+            </div>
+            <div class="map-toolbar" id="map-toolbar">
+              <div class="mini-map" id="mini-map" title="Back to system view"></div>
+            </div>
+            <svg class="map-lines" id="map-lines" viewBox="0 0 800 520" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <div class="map-nodes" id="map-nodes"></div>
+          </div>
+
+          
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
