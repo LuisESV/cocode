@@ -60,6 +60,8 @@ python3 -m http.server --directory web 8000
 
 Then open `http://localhost:8000` in your browser.
 
+![Web demo screenshot](web/demo.png)
+
 ## Requirements
 
 - Python 3.9 or higher
